@@ -1,0 +1,233 @@
+---
+title: "coexpression_file"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#install packages
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install()
+```
+
+```{r}
+install.packages(c("matrixStats", "Hmisc", "splines", "foreach", "doParallel", "fastcluster", "dynamicTreeCut", "survival"))
+BiocManager::install()
+
+```
+```{r}
+install.packages("BiocManager")
+BiocManager::install(c("GO.db", "preprocessCore", "impute"))
+```
+
+```{r}
+BiocManager::install("WGCNA")
+```
+
+#load data
+
+```{r}
+library(WGCNA);
+options(stringsAsFactors = FALSE);
+train_rnaseq = read.csv("rnaseq_geneset.csv", header = TRUE);
+test_rnaseq = read.csv("test_rnaseq_geneset.csv", header = TRUE);
+rownames(train_rnaseq) <- train_rnaseq$X
+train_rnaseq$X <- NULL 
+train_rnaseq <- t(train_rnaseq)
+as.data.frame.matrix(train_rnaseq)
+rownames(test_rnaseq) <- test_rnaseq$X
+test_rnaseq$X <- NULL
+test_rnaseq <- as.data.frame.matrix(test_rnaseq)
+colnames(test_rnaseq) <- gsub("\\.", "-", colnames(test_rnaseq))
+
+```
+```{r}
+colnames(train_rnaseq)
+```
+
+```{r}
+colnames(test_rnaseq)
+
+```
+
+
+#check for too many missing values
+
+```{r}
+gsg = goodSamplesGenes(train_rnaseq, verbose = 3);
+gsg$allOK
+```
+
+#check for outliers
+```{r}
+sampleTree = hclust(dist(train_rnaseq), method = "average");
+# Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too small.
+sizeGrWindow(8,4)
+#pdf(file = "Plots/sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+cex.axis = 1.5, cex.main = 2)
+```
+#No significant outliners appear. 
+
+#choose power
+
+```{r}
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(train_rnaseq, powerVector = powers, verbose = 5)
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+```
+#Go for a soft power of 9.
+
+#perform calculation
+```{r}
+net = blockwiseModules(train_rnaseq, power = 9,
+TOMType = "unsigned", minModuleSize = 2,
+reassignThreshold = 0, mergeCutHeight = 0.25,
+numericLabels = TRUE, pamRespectsDendro = FALSE,
+saveTOMs = TRUE,
+saveTOMFileBase = "train_rna_geneset",
+verbose = 3)
+```
+
+#check for number of modules (0 is for genes not in a module)
+```{r}
+table(net$colors)
+```
+
+```{r}
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+MEs = net$MEs;
+save(MEs, moduleLabels, moduleColors,
+file = "train_rnaseq_geneset-networkConstruction-auto.RData")
+```
+
+#ME values for genes that are in a module
+```{r}
+MEs$ME0 <- NULL
+coexpression_train <- MEs
+coexpression_train
+```
+
+#for train set:concat the expression data for genes outside modules with the calculated ME values for each module
+#For modules' color label: turquoise = 1, grey = 0, blue = 2, brown = 3
+```{r}
+library(data.table)
+library(dplyr)
+mod0_name <- names(net$colors)[moduleColors=="grey"]
+# train_no_moules <- subset(df, net$colors ==0)
+# setDT(train_no_moules, keep.rownames = TRUE)[] #give a column name so can pull name out 
+# train_genenomodules <- train_no_moules%>% pull(rn)
+# train_genenomodules
+final_train_coexpression <- train_rnaseq[,colnames(train_rnaseq) %in% mod0_name]
+final_train_coexpression <- as.data.frame.matrix(final_train_coexpression)
+final_train_coexpression <- merge(final_train_coexpression, coexpression_train, by="row.names")
+rownames(final_train_coexpression) <- final_train_coexpression$Row.names
+final_train_coexpression$Row.names <- NULL
+final_train_coexpression
+```
+
+```{r}
+write.csv(final_train_coexpression,"Final_train_coexpression.csv")
+```
+
+
+
+#get the name of genes within each module to pull the expression data out from test set
+
+```{r}
+mod1_name <- names(net$colors)[moduleColors=="turquoise"]
+mod2_name <- names(net$colors)[moduleColors=="blue"]
+mod3_name <- names(net$colors)[moduleColors=="brown"]
+```
+
+#form dataframes for each module of genes from test set
+```{r}
+df_1 <- t(test_rnaseq[,colnames(test_rnaseq) %in% mod1_name])
+df_1 <- as.data.frame.matrix(df_1)
+
+df_2 <- t(test_rnaseq[,colnames(test_rnaseq) %in% mod2_name])
+df_2 <- as.data.frame.matrix(df_2)
+
+df_3 <- t(test_rnaseq[,colnames(test_rnaseq) %in% mod3_name])
+df_3 <- as.data.frame.matrix(df_3)
+df_2
+
+```
+
+#Calculate ME for each module for the test set
+
+
+
+```{r}
+ei1 <- svd(df_1)$v
+ei1 <- as.data.frame((ei1))
+ei1 <-rowMeans(ei1)
+ei1 <- as.data.frame((ei1))
+row.names(ei1) <- row.names(test_rnaseq)
+names(ei1)[1]<-"ME1"
+
+ei2 <- svd(df_2)$v
+ei2 <-rowMeans(ei2)
+ei2 <- as.data.frame((ei2))
+row.names(ei2) <- row.names(test_rnaseq)
+names(ei2)[1]<-"ME2"
+
+
+ei3 <- svd(df_3)$v
+ei3 <- as.data.frame((ei3))
+ei3 <-rowMeans(ei3)
+ei3 <- as.data.frame((ei3))
+row.names(ei3) <- row.names(test_rnaseq)
+names(ei3)[1]<-"ME3"
+```
+
+#for test set: concat the expression data for genes outside modules with the calculated ME values for each module
+```{r}
+final_test_coexpression0 <- test_rnaseq[,colnames(test_rnaseq) %in% mod0_name]
+final_test_coexpression1 <- merge(final_test_coexpression0,ei1, by="row.names")
+rownames(final_test_coexpression1) <- final_test_coexpression1$Row.names
+final_test_coexpression1$Row.names <- NULL
+final_test_coexpression2 <- merge(final_test_coexpression1,ei2, by="row.names")
+rownames(final_test_coexpression2) <- final_test_coexpression2$Row.names
+final_test_coexpression2$Row.names <- NULL
+final_test_coexpression <- merge(final_test_coexpression2,ei3, by="row.names")
+rownames(final_test_coexpression) <- final_test_coexpression$Row.names
+final_test_coexpression$Row.names <- NULL
+final_test_coexpression
+
+```
+
+```{r}
+write.csv(final_test_coexpression,"Final_test_coexpression.csv")
+```
+
+
+
+
